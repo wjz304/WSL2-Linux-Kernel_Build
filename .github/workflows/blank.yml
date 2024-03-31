@@ -1,0 +1,87 @@
+#
+# Copyright (C) 2022 Ing <https://github.com/wjz304>
+# 
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
+
+name: Sync build
+
+on:
+  schedule:
+    - cron: "20 */6 * * *"
+
+  workflow_dispatch:
+    inputs:
+      tag: 
+        description: 'tag'
+        required: false
+        type: string
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+
+      - name: Init Env
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          sudo timedatectl set-timezone "Asia/Shanghai"
+
+      - name: Check
+        run: |
+          TAG="${{ inputs.tag }}"
+          BODY=""
+          if [ -z "${TAG}" ]; then
+            MSTAG="$(curl -skL "https://api.github.com/repos/microsoft/WSL2-Linux-Kernel/releases/latest" | jq -r .tag_name)"
+            MYTAG="$(curl -skL "https://api.github.com/repos/${{ github.repository }}/releases/latest" | jq -r .tag_name)"
+            [ ! "${MSTAG}" = "${MYTAG}" ] && TAG="${MSTAG}"
+          fi
+          echo "TAG=${TAG}" >> $GITHUB_ENV
+          if [ -n "${TAG}" ]; then
+            echo "BODY<<EOF" >> $GITHUB_ENV
+            curl -skL "https://api.github.com/repos/microsoft/WSL2-Linux-Kernel/releases/tags/${TAG}" | jq -r .body >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          fi
+
+      - name: Build
+        if: env.TAG != ''
+        run: |
+          TAG=${{ env.TAG }}
+          
+          sudo apt update
+          sudo apt -y install build-essential libncurses-dev bison flex libssl-dev libelf-dev dwarves
+
+          curl -kL https://github.com/microsoft/WSL2-Linux-Kernel/archive/refs/tags/${TAG}.tar.gz -o ${TAG}.tar.gz
+          tar -zxf ${TAG}.tar.gz -C .
+          
+          (
+            cd WSL2-Linux-Kernel-${TAG}
+            cp Microsoft/config-wsl .config
+            make -j$(nproc)
+          )
+
+          gzip -c WSL2-Linux-Kernel-${TAG}/arch/x86/boot/bzImage > ${TAG}.gz
+
+      - name: Upload to Artifacts
+        if: success() && env.TAG != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: bzImage
+          path: |
+            ${{ env.TAG }}.gz
+          retention-days: 5
+
+      - name: Upload to Release
+        if: success() && env.TAG != ''
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.TAG }}
+          body: |
+            ${{ env.BODY }}
+          files: ${{ env.TAG }}.gz
